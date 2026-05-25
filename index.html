@@ -571,9 +571,13 @@ function renderHistoryList(app) {
       <button class="home-btn" id="back">🏠</button>
       <span class="title">History Record</span>
     </div>
-    <div class="content">${cards}</div>
+    <div class="content">
+      ${cards}
+      <button class="btn outline" id="home2" style="margin-top:16px;">🏠 回首頁</button>
+    </div>
   `;
   document.getElementById('back').onclick = () => go('home');
+  document.getElementById('home2').onclick = () => go('home');
   app.querySelectorAll('.list-card').forEach(el => {
     el.onclick = () => go('historyMember', { memberNo: Number(el.dataset.m) });
   });
@@ -592,9 +596,15 @@ function renderHistoryMemberSessions(app) {
       <div class="list-card" data-s="1" data-b="B">Session 1 · Round 11-20</div>
       <div class="list-card" data-s="2" data-b="A">Session 2 · Round 1-10</div>
       <div class="list-card" data-s="2" data-b="B">Session 2 · Round 11-20</div>
+      <div class="btn-row" style="margin-top:16px;">
+        <button class="btn outline" id="back2">← 上一頁</button>
+        <button class="btn outline" id="home2">🏠 回首頁</button>
+      </div>
     </div>
   `;
   document.getElementById('back').onclick = () => go('history');
+  document.getElementById('back2').onclick = () => go('history');
+  document.getElementById('home2').onclick = () => go('home');
   app.querySelectorAll('.list-card').forEach(el => {
     el.onclick = () => go('historyTable', {
       memberNo: m,
@@ -655,11 +665,15 @@ function renderHistoryTable(app) {
           <tbody>${trs}</tbody>
         </table>
       </div>
-      <button class="btn outline" id="back2">返回</button>
+      <div class="btn-row">
+        <button class="btn outline" id="back2">← 上一頁</button>
+        <button class="btn outline" id="home2">🏠 回首頁</button>
+      </div>
     </div>
   `;
   document.getElementById('back').onclick = () => go('home');
   document.getElementById('back2').onclick = () => go('historyMember', { memberNo });
+  document.getElementById('home2').onclick = () => go('home');
 }
 
 /* =============================================================================
@@ -975,10 +989,13 @@ function renderGroupTotal(app) {
     <div class="header"><span class="title">This Round · Round ${STATE.currentRound}</span></div>
     <div class="content center">
       <p style="font-size:20px; margin-top:10px;">此輪 Group Account 總共是</p>
-      <div class="confirm-box" style="font-size:34px; font-weight:700; padding:24px;">
-        ${contribs2formula()} = <b>${C}</b>
+      <div class="confirm-box" style="font-size:64px; font-weight:700; padding:32px;">
+        ${C}
       </div>
-      <p>× ${MPCR_NUM} = <b style="font-size:26px">${D}</b></p>
+      <p style="font-size:20px;">× ${MPCR_NUM} =</p>
+      <div class="confirm-box" style="font-size:64px; font-weight:700; padding:32px;">
+        ${D}
+      </div>
       <div class="warning">請將頁面給四位受試者看完才可按下一頁</div>
       <button class="btn primary" id="next">Next: distribute results →</button>
     </div>
@@ -1007,8 +1024,8 @@ function renderGroupTotal(app) {
   };
 }
 function contribs2formula() {
-  const c = STATE.pendingContributions;
-  return `(${c[1]}+${c[2]}+${c[3]}+${c[4]})`;
+  // (no longer used — kept as a stub for any future debug needs)
+  return '';
 }
 
 /* =============================================================================
@@ -1106,8 +1123,8 @@ function renderFinalTotal(app) {
     <div class="header"><span class="title">This Round · Round ${r}</span></div>
     <div class="content center">
       <p class="big-msg">四人此輪總收益共是</p>
-      <div class="confirm-box" style="font-size:30px;">
-        ${totals.join(' + ')} = <b style="font-size:40px">${sumF}</b>
+      <div class="confirm-box" style="font-size:72px; font-weight:700; padding:40px;">
+        ${sumF}
       </div>
       <div class="warning">請將頁面給 moderator 看完才可回首頁</div>
       <button class="btn primary" id="home">返回首頁</button>
