@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PGG Diagnostic</title>
+<style>
+body { font-family: monospace; padding: 20px; background: #fff; color: #000; font-size: 14px; }
+.ok { color: green; } .err { color: red; } .info { color: blue; }
+pre { background: #f0f0f0; padding: 10px; white-space: pre-wrap; word-break: break-all; }
+button { padding: 12px 20px; font-size: 16px; margin: 8px 0; }
+</style>
+</head><body>
+<h2>PGG Field App — 診斷工具</h2>
+<div id="out"></div>
+<button onclick="location.href='./index.html'">→ 載入完成後試試開啟 App</button>
+<script>
+const out = document.getElementById('out');
+function log(msg, cls='info') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.innerHTML = msg;
+  out.appendChild(d);
+}
+function pre(s) {
+  const p = document.createElement('pre');
+  p.textContent = s;
+  out.appendChild(p);
+}
+
+log('1. 檢查瀏覽器資訊', 'info');
+pre('User Agent: ' + navigator.userAgent);
+pre('語言: ' + navigator.language);
+pre('Online: ' + navigator.onLine);
+
+log('2. 檢查 localStorage', 'info');
+try {
+  localStorage.setItem('test', '1');
+  const v = localStorage.getItem('test');
+  localStorage.removeItem('test');
+  log('✓ localStorage 可用 (測試值: ' + v + ')', 'ok');
+} catch (e) {
+  log('✗ localStorage 失敗: ' + e.message, 'err');
+  log('如果是 Safari 無痕模式，請改用一般模式', 'err');
+}
+
+log('3. 檢查既有 localStorage 內容', 'info');
+const existing = localStorage.getItem('pgg_field_state_v1');
+if (existing) {
+  log('已有舊資料，長度 ' + existing.length + ' 字元', 'info');
+  pre(existing.substring(0, 500) + (existing.length > 500 ? '...(截斷)' : ''));
+  const btn = document.createElement('button');
+  btn.textContent = '⚠ 清除舊資料（如果是這個害的）';
+  btn.style.background = '#f88';
+  btn.onclick = () => {
+    localStorage.removeItem('pgg_field_state_v1');
+    log('✓ 已清除', 'ok');
+  };
+  out.appendChild(btn);
+} else {
+  log('✓ 沒有舊資料', 'ok');
+}
+
+log('4. 抓 index.html 看看', 'info');
+fetch('./index.html').then(r => {
+  log('Status: ' + r.status, r.ok ? 'ok' : 'err');
+  return r.text();
+}).then(html => {
+  log('檔案大小: ' + html.length + ' 字元', 'ok');
+  // 抓 <script> 區塊出來測語法
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  if (!m) { log('✗ 沒找到 <script>', 'err'); return; }
+  const js = m[1];
+  log('JS 長度: ' + js.length + ' 字元', 'ok');
+  try {
+    new Function(js);
+    log('✓ JS 語法檢查通過', 'ok');
+  } catch (e) {
+    log('✗ JS 語法錯誤: ' + e.message, 'err');
+    pre(e.stack || e.toString());
+  }
+}).catch(e => log('✗ fetch 失敗: ' + e.message, 'err'));
+
+log('5. 檢查 Service Worker', 'info');
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    log('已註冊的 SW 數量: ' + regs.length, 'info');
+    regs.forEach(r => log('SW scope: ' + r.scope, 'info'));
+    if (regs.length > 0) {
+      const btn = document.createElement('button');
+      btn.textContent = '⚠ 清除 Service Worker（如果是 SW 害的）';
+      btn.style.background = '#f88';
+      btn.onclick = async () => {
+        for (const r of regs) await r.unregister();
+        log('✓ SW 已清除，請重新整理', 'ok');
+      };
+      out.appendChild(btn);
+    }
+  });
+} else {
+  log('此瀏覽器不支援 Service Worker', 'err');
+}
+
+window.addEventListener('error', e => {
+  log('✗ JS 執行時錯誤: ' + e.message + ' @ ' + e.filename + ':' + e.lineno, 'err');
+});
+</script>
+</body></html>
