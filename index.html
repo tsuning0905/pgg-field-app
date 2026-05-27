@@ -379,6 +379,11 @@ function blockLabel(session, block) {
   const range = block === 'A' ? '1-10' : '11-20';
   return `Session ${session} · Round ${range}`;
 }
+/* Shows the absolute round number (1-20) within the session, used in headers
+   and content of every in-experiment screen. */
+function sessionRoundLabel() {
+  return `Session ${STATE.currentSession} · Round ${STATE.currentRound}`;
+}
 function showToast(msg, ms = 1800) {
   const t = document.createElement('div');
   t.className = 'toast';
@@ -427,7 +432,7 @@ function render() {
     historyMember: renderHistoryMemberSessions,
     historyTable: renderHistoryTable,
     thisRound: renderThisRoundMenu,
-    blockMenu: renderBlockMenu,
+    blockMenu: () => advanceToNextRound(),
     callMember: renderCallMember,
     memberPin: renderMemberPin,
     memberHome: renderMemberHome,
@@ -440,6 +445,7 @@ function render() {
     memberHomeResults: renderMemberHomeResults,
     memberHistory: renderMemberHistory,
     memberThisRound: renderMemberThisRound,
+    callFinalTotal: renderCallFinalTotal,
     finalTotal: renderFinalTotal,
     exportData: renderExport
   };
@@ -454,7 +460,7 @@ function renderSetup(app) {
   app.innerHTML = `
     <div class="header"><span class="title">🏠 Home</span></div>
     <div class="content">
-      <h2 style="text-align:center">請輸入以下資料</h2>
+      <h2 style="text-align:center">Setup</h2>
 
       <div class="field">
         <label>Facilitator Name</label>
@@ -469,7 +475,7 @@ function renderSetup(app) {
         <input id="f-vnum" type="number" inputmode="numeric" placeholder="">
       </div>
       <div class="field">
-        <label>此回實驗密碼 (4 位數字 — 全程使用此密碼)</label>
+        <label>Session PIN (4 digits — used throughout the whole experiment)</label>
         <input id="f-pin" type="tel" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="1234">
       </div>
       <div class="field">
@@ -511,8 +517,8 @@ function renderSetup(app) {
     const vnum = document.getElementById('f-vnum').value.trim();
     const pin = document.getElementById('f-pin').value.trim();
     const date = document.getElementById('f-date').value;
-    if (!name || !vname || !vnum) { showToast('請填寫所有欄位'); return; }
-    if (!/^\d{4}$/.test(pin)) { showToast('密碼必須是 4 位數字'); return; }
+    if (!name || !vname || !vnum) { showToast('Please fill in all fields'); return; }
+    if (!/^\d{4}$/.test(pin)) { showToast('PIN must be 4 digits'); return; }
     STATE.setup = {
       facilitatorName: name,
       villageName: vname,
@@ -538,7 +544,7 @@ function renderHome(app) {
         Facilitator: ${escapeHtml(STATE.setup.facilitatorName)}
       </div>
       <hr class="divider">
-      <button class="btn" id="btn-this">This Round</button>
+      <button class="btn" id="btn-this">Start Experiment</button>
       <button class="btn" id="btn-hist">History Record</button>
       <button class="btn" id="btn-exp">Export to CSV</button>
       <div class="spacer"></div>
@@ -549,7 +555,7 @@ function renderHome(app) {
   document.getElementById('btn-hist').onclick = () => go('history');
   document.getElementById('btn-exp').onclick = () => go('exportData');
   document.getElementById('btn-reset').onclick = () => {
-    if (confirm('Reset all data? This cannot be undone.\n\n清除所有資料?此動作不可復原')) {
+    if (confirm('Reset all data? This cannot be undone.')) {
       resetState();
       route = 'setup';
       saveState();
@@ -573,7 +579,7 @@ function renderHistoryList(app) {
     </div>
     <div class="content">
       ${cards}
-      <button class="btn outline" id="home2" style="margin-top:16px;">🏠 回首頁</button>
+      <button class="btn outline" id="home2" style="margin-top:16px;">🏠 Home</button>
     </div>
   `;
   document.getElementById('back').onclick = () => go('home');
@@ -597,8 +603,8 @@ function renderHistoryMemberSessions(app) {
       <div class="list-card" data-s="2" data-b="A">Session 2 · Round 1-10</div>
       <div class="list-card" data-s="2" data-b="B">Session 2 · Round 11-20</div>
       <div class="btn-row" style="margin-top:16px;">
-        <button class="btn outline" id="back2">← 上一頁</button>
-        <button class="btn outline" id="home2">🏠 回首頁</button>
+        <button class="btn outline" id="back2">← Back</button>
+        <button class="btn outline" id="home2">🏠 Home</button>
       </div>
     </div>
   `;
@@ -666,8 +672,8 @@ function renderHistoryTable(app) {
         </table>
       </div>
       <div class="btn-row">
-        <button class="btn outline" id="back2">← 上一頁</button>
-        <button class="btn outline" id="home2">🏠 回首頁</button>
+        <button class="btn outline" id="back2">← Back</button>
+        <button class="btn outline" id="home2">🏠 Home</button>
       </div>
     </div>
   `;
@@ -683,53 +689,56 @@ function renderThisRoundMenu(app) {
   app.innerHTML = `
     <div class="header">
       <button class="home-btn" id="back">🏠</button>
-      <span class="title">This Round</span>
+      <span class="title">Start Experiment</span>
     </div>
     <div class="content center">
-      <p class="big-msg">進入此環節後將暫時無法回到首頁<br>須等到 10 Round 結束後才可以回到首頁</p>
-      <p class="muted">After entering, you cannot return to Home until all 4 members in this round have completed the cycle.</p>
+      <p class="big-msg">Once you press Start, you cannot return to Home until all 40 rounds are complete.</p>
+      <p class="muted">Order is locked: Session 1 Rounds 1–20, then Session 2 Rounds 1–20.</p>
       <button class="btn primary" id="start">Start</button>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn outline" id="back2">← Back</button>
+        <button class="btn outline" id="home2">🏠 Home</button>
+      </div>
     </div>
   `;
   document.getElementById('back').onclick = () => go('home');
-  document.getElementById('start').onclick = () => go('blockMenu');
+  document.getElementById('back2').onclick = () => go('home');
+  document.getElementById('home2').onclick = () => go('home');
+  document.getElementById('start').onclick = () => {
+    // Find next round in the locked order (Session 1 R1..20, Session 2 R1..20)
+    advanceToNextRound();
+  };
 }
 
-function renderBlockMenu(app) {
-  app.innerHTML = `
-    <div class="header">
-      <button class="home-btn" id="back">🏠</button>
-      <span class="title">This Round</span>
-    </div>
-    <div class="content">
-      <div class="list-card" data-s="1" data-b="A">Session 1 · Round 1-10</div>
-      <div class="list-card" data-s="1" data-b="B">Session 1 · Round 11-20</div>
-      <div class="list-card" data-s="2" data-b="A">Session 2 · Round 1-10</div>
-      <div class="list-card" data-s="2" data-b="B">Session 2 · Round 11-20</div>
-    </div>
-  `;
-  document.getElementById('back').onclick = () => go('home');
-  app.querySelectorAll('.list-card').forEach(el => {
-    el.onclick = () => {
-      const session = Number(el.dataset.s);
-      const block = el.dataset.b;
-      const rounds = roundsForBlock(block);
-      // pick the NEXT round that has not yet been completed for member 1
-      const completed = STATE.history[1].filter(r => r.session === session && r.block === block).map(r => r.round);
-      const nextRound = rounds.find(r => !completed.includes(r));
-      if (!nextRound) {
-        showToast('此 Block 所有 10 個 Round 都已完成');
-        return;
-      }
-      STATE.currentSession = session;
-      STATE.currentBlock = block;
-      STATE.currentRound = nextRound;
-      STATE.currentSection = 0;  // contribution phase
+/* ---------- Locked auto-flow advance ----------
+   Order: S1-R1..R10 (block A), S1-R11..R20 (block B), S2-R1..R10 (A), S2-R11..R20 (B).
+   Finds the first round not yet completed for member 1 and routes to callMember 1.
+   If all 40 rounds are done, routes home. */
+function advanceToNextRound() {
+  const order = [
+    { s: 1, b: 'A' }, { s: 1, b: 'B' },
+    { s: 2, b: 'A' }, { s: 2, b: 'B' }
+  ];
+  for (const seg of order) {
+    const rounds = roundsForBlock(seg.b);
+    const done = STATE.history[1].filter(r => r.session === seg.s && r.block === seg.b).map(r => r.round);
+    const next = rounds.find(r => !done.includes(r));
+    if (next != null) {
+      STATE.currentSession = seg.s;
+      STATE.currentBlock = seg.b;
+      STATE.currentRound = next;
+      STATE.currentSection = 0;
       STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
       saveState();
       go('callMember', { memberNo: 1 });
-    };
-  });
+      return;
+    }
+  }
+  // All 40 rounds complete
+  STATE.currentSection = 0;
+  STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
+  saveState();
+  go('home');
 }
 
 /* =============================================================================
@@ -739,11 +748,11 @@ function renderCallMember(app) {
   const m = routeArgs.memberNo;
   app.innerHTML = `
     <div class="header">
-      <span class="title">This Round · Round ${STATE.currentRound}</span>
+      <span class="title">${sessionRoundLabel()}</span>
     </div>
     <div class="content center">
-      <p class="big-msg">請 ${escapeHtml(memberLabel(m))} 受試者<br>前來決定貢獻 token</p>
-      <p class="muted">Please call this participant to the table.</p>
+      <p class="big-msg">${sessionRoundLabel()}</p>
+      <p class="big-msg">Please call ${escapeHtml(memberLabel(m))} to decide their contribution.</p>
       <button class="btn primary" id="go">Hand phone to participant →</button>
     </div>
   `;
@@ -755,9 +764,11 @@ function renderCallMember(app) {
 ============================================================================= */
 function renderMemberPin(app) {
   const m = routeArgs.memberNo;
+  const purpose = routeArgs.purpose || (STATE.currentSection === 0 ? 'contribute' : 'results');
   app.innerHTML = `
-    <div class="header"><span class="title">🏠 Home</span></div>
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
     <div class="content center">
+      <p class="big-msg">${sessionRoundLabel()}</p>
       <p class="big-msg">Enter 4-digit code</p>
       <div class="pin-row" id="pin-row">
         <div class="pin-box"></div>
@@ -784,14 +795,16 @@ function renderMemberPin(app) {
     boxes.forEach((b,i) => b.textContent = v[i] ? '•' : '');
     if (v.length === 4) {
       if (v === STATE.setup.pin) {
-        // success
-        if (STATE.currentSection === 0) {
-          go('memberHome', { memberNo: m });
-        } else {
+        // success — route by purpose
+        if (purpose === 'finalTotal') {
+          go('finalTotal');
+        } else if (purpose === 'results') {
           go('memberHomeResults', { memberNo: m });
+        } else {
+          go('memberHome', { memberNo: m });
         }
       } else {
-        err.textContent = '密碼錯誤，請重新輸入';
+        err.textContent = 'Wrong PIN — please try again';
         pinIn.value = '';
         boxes.forEach(b => b.textContent = '');
         setTimeout(() => pinIn.focus(), 100);
@@ -807,8 +820,9 @@ function renderMemberHome(app) {
   const m = routeArgs.memberNo;
   const last = STATE.lastTotals[m];
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} Home</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content">
+      <div style="text-align:center; font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <button class="btn" id="hist">History Record</button>
       <div class="last-round-card">
         <div class="heading">Cumulative so far</div>
@@ -895,8 +909,9 @@ function renderMemberContribute(app) {
   const m = routeArgs.memberNo;
   let chosen = STATE.pendingContributions[m] != null ? STATE.pendingContributions[m] : null;
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content">
+      <div style="text-align:center; font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <p class="big-msg" style="text-align:center">You start this round with <b>10 tokens</b>.</p>
       <p style="text-align:center">How much would you like to contribute to the group account?</p>
       <div class="contrib-num" id="display">${chosen != null ? chosen : '?'}</div>
@@ -934,8 +949,9 @@ function renderMemberConfirm(app) {
   const m = routeArgs.memberNo;
   const n = STATE.pendingContributions[m];
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content">
+      <div style="text-align:center; font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <div class="confirm-title">Confirm</div>
       <div class="confirm-box">
         keep<br><div class="num">${10 - n}</div>tokens in private
@@ -958,10 +974,11 @@ function renderMemberConfirm(app) {
 function renderMemberThanks(app) {
   const m = routeArgs.memberNo;
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content center">
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <p class="big-msg">Thank you. Please return to your seat and wait for the group account results.</p>
-      <div class="warning">請將手機交給 Facilitator 操作</div>
+      <div class="warning">Please hand the phone back to the Facilitator.</div>
       <button class="btn primary" id="ok">→ Hand back to facilitator</button>
     </div>
   `;
@@ -986,9 +1003,10 @@ function renderGroupTotal(app) {
   const C = routeArgs.C;
   const D = C * MPCR_NUM;
   app.innerHTML = `
-    <div class="header"><span class="title">This Round · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
     <div class="content center">
-      <p style="font-size:20px; margin-top:10px;">此輪 Group Account 總共是</p>
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
+      <p style="font-size:20px; margin-top:10px;">Group Account total this round</p>
       <div class="confirm-box" style="font-size:64px; font-weight:700; padding:32px;">
         ${C}
       </div>
@@ -996,7 +1014,7 @@ function renderGroupTotal(app) {
       <div class="confirm-box" style="font-size:64px; font-weight:700; padding:32px;">
         ${D}
       </div>
-      <div class="warning">請將頁面給四位受試者看完才可按下一頁</div>
+      <div class="warning">Show this screen to all four participants before pressing Next.</div>
       <button class="btn primary" id="next">Next: distribute results →</button>
     </div>
   `;
@@ -1033,9 +1051,10 @@ function contribs2formula() {
 ============================================================================= */
 function renderWaitForResults(app) {
   app.innerHTML = `
-    <div class="header"><span class="title">This Round · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
     <div class="content center">
-      <div class="warning">請將手機交給 Facilitator 操作</div>
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
+      <div class="warning">Please hand the phone back to the Facilitator.</div>
       <p class="big-msg">Now show each participant their personal result</p>
       <button class="btn primary" id="go">Start with Member 1 →</button>
     </div>
@@ -1047,15 +1066,15 @@ function renderWaitForResults(app) {
 function renderCallMemberResults(app) {
   const m = routeArgs.memberNo;
   app.innerHTML = `
-    <div class="header"><span class="title">This Round · Round ${STATE.currentRound}</span></div>
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
     <div class="content center">
-      <p class="big-msg">請 ${escapeHtml(memberLabel(m))} 受試者<br>前來查看本回結果</p>
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
+      <p class="big-msg">Please call ${escapeHtml(memberLabel(m))} to view their result.</p>
       <button class="btn primary" id="go">Hand phone to participant →</button>
     </div>
   `;
   document.getElementById('go').onclick = () => {
-    // Reuse the same PIN entry screen, then route to memberHomeResults
-    go('memberPin', { memberNo: m });
+    go('memberPin', { memberNo: m, purpose: 'results' });
   };
 }
 
@@ -1063,8 +1082,9 @@ function renderCallMemberResults(app) {
 function renderMemberHomeResults(app) {
   const m = routeArgs.memberNo;
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} Home</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content">
+      <div style="text-align:center; font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <button class="btn" id="hist">History Record</button>
       <button class="btn primary" id="this">This Round Result →</button>
     </div>
@@ -1086,10 +1106,11 @@ function renderMemberThisRound(app) {
     return;
   }
   app.innerHTML = `
-    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · This Round</span></div>
+    <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
     <div class="content">
+      <div style="text-align:center; font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
       <div class="result-card">
-        <h2>Round ${STATE.currentRound}</h2>
+        <h2>This Round</h2>
         <div class="result-row"><div class="label">(A) My Contribution</div><div class="value">${rec.A}</div></div>
         <div class="result-row"><div class="label">(B) Private kept = 10 − A</div><div class="value">${rec.B}</div></div>
         <div class="result-row"><div class="label">(C) Group Total</div><div class="value">${rec.C}</div></div>
@@ -1097,15 +1118,37 @@ function renderMemberThisRound(app) {
         <div class="result-row"><div class="label">(E) My share = D ÷ 4</div><div class="value">${rec.E}</div></div>
         <div class="result-row"><div class="label">(F) Profit = B + E</div><div class="value">${rec.F}</div></div>
       </div>
-      <button class="btn primary" id="ok">Confirm</button>
+      <div class="btn-row">
+        <button class="btn outline" id="back">← Back</button>
+        <button class="btn primary" id="ok">Confirm</button>
+      </div>
     </div>
   `;
+  document.getElementById('back').onclick = () => go('memberHomeResults', { memberNo: m });
   document.getElementById('ok').onclick = () => {
     if (m < 4) {
       go('callMemberResults', { memberNo: m + 1 });
     } else {
-      go('finalTotal');
+      // After member 4 confirms, require PIN before showing the four-person total —
+      // this prevents the 4th participant from seeing the group total themselves.
+      go('callFinalTotal');
     }
+  };
+}
+
+/* SCREEN: prompt before final total (facilitator hands phone to themself / moderator) */
+function renderCallFinalTotal(app) {
+  app.innerHTML = `
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
+    <div class="content center">
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
+      <div class="warning">Please return the phone to the Facilitator before viewing the four-person total.</div>
+      <button class="btn primary" id="go">Facilitator continue →</button>
+    </div>
+  `;
+  document.getElementById('go').onclick = () => {
+    // PIN entry, then go to finalTotal
+    go('memberPin', { memberNo: 4, purpose: 'finalTotal' });
   };
 }
 
@@ -1120,22 +1163,24 @@ function renderFinalTotal(app) {
   }
   const sumF = totals.reduce((a,b)=>a+b, 0);
   app.innerHTML = `
-    <div class="header"><span class="title">This Round · Round ${r}</span></div>
+    <div class="header"><span class="title">${sessionRoundLabel()}</span></div>
     <div class="content center">
-      <p class="big-msg">四人此輪總收益共是</p>
+      <div style="font-size:16px; opacity:0.9; margin-bottom:8px;">${sessionRoundLabel()}</div>
+      <p class="big-msg">Total profit of all four members this round</p>
       <div class="confirm-box" style="font-size:72px; font-weight:700; padding:40px;">
         ${sumF}
       </div>
-      <div class="warning">請將頁面給 moderator 看完才可回首頁</div>
-      <button class="btn primary" id="home">返回首頁</button>
+      <div class="warning">Show this screen to the moderator before continuing.</div>
+      <button class="btn primary" id="next">Continue →</button>
     </div>
   `;
-  document.getElementById('home').onclick = () => {
-    // clear in-progress state
+  document.getElementById('next').onclick = () => {
+    // clear in-progress state for the round just finished
     STATE.currentSection = 0;
     STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
     saveState();
-    go('home');
+    // Auto-advance to the next round in the locked order, or home if all 40 done
+    advanceToNextRound();
   };
 }
 
