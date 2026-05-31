@@ -304,13 +304,23 @@ const MPCR_NUM = 2;        // total contributions are multiplied by 2 then split
 const TOKENS_PER_ROUND = 10;
 const TOKENS_PER_ZAR = 4;  // 4 tokens = 1 ZAR (from field script)
 const MEMBERS_PER_GROUP = 4;
+const SHOW_UP_FEE_ZAR = 30; // Z5 reconciliation show-up fee
 
 /* ---------- STORAGE ---------- */
 const LS_KEY = 'pgg_field_state_v1';
 function loadState() {
   try {
     const s = localStorage.getItem(LS_KEY);
-    if (s) return JSON.parse(s);
+    if (s) {
+      const parsed = JSON.parse(s);
+      // Backfill new fields when loading an older saved state
+      if (!parsed.viewedResults) parsed.viewedResults = {1:false, 2:false, 3:false, 4:false};
+      if (parsed.finalTotalShown === undefined) parsed.finalTotalShown = false;
+      if (!parsed.pendingStartTimes) parsed.pendingStartTimes = {1:null, 2:null, 3:null, 4:null};
+      if (!parsed.pendingTimestamps) parsed.pendingTimestamps = {1:null, 2:null, 3:null, 4:null};
+      if (!parsed.pendingDecisionSeconds) parsed.pendingDecisionSeconds = {1:null, 2:null, 3:null, 4:null};
+      return parsed;
+    }
   } catch (e) {}
   return null;
 }
@@ -323,13 +333,18 @@ function resetState() {
 }
 function makeFreshState() {
   return {
-    setup: null,            // { facilitatorName, villageName, villageNumber, date, colour, pin }
+    setup: null,            // { facilitatorName, villageName, villageNumber, villageType, date, colour, pin }
     currentSection: 0,      // 0 = contribution phase; 1 = results phase
     currentSession: null,   // 1 or 2
-    currentBlock: null,     // 'A' (R1-10) or 'B' (R11-20)
+    currentBlock: null,     // 'A' (R1-10, no comm) or 'B' (R11-20, with comm)
     currentRound: null,     // 1..20
     pendingContributions: {1:null, 2:null, 3:null, 4:null}, // for the in-progress round
-    history: {              // history[memberNo][roundIdx] = { A, B, C, D, E, F, session, round, block }
+    pendingStartTimes: {1:null, 2:null, 3:null, 4:null},   // ms timestamps when each member opened the contribute screen
+    pendingTimestamps: {1:null, 2:null, 3:null, 4:null},   // ISO strings — when each member confirmed
+    pendingDecisionSeconds: {1:null, 2:null, 3:null, 4:null}, // (confirm - start) in seconds
+    viewedResults: {1:false, 2:false, 3:false, 4:false},   // who has seen their results this round
+    finalTotalShown: false, // four-person total shown this round (to round-trip safely)
+    history: {              // history[memberNo][roundIdx] = { A, B, C, D, E, F, session, round, block, contribution_timestamp, decision_seconds }
       1: [], 2: [], 3: [], 4: []
     },
     lastTotals: {           // by member -> running totals up to last completed round
@@ -349,6 +364,12 @@ function go(name, args = {}) {
   route = name; routeArgs = args;
   // scroll to top on every navigation
   window.scrollTo(0, 0);
+  // Push a history entry so the hardware back button can be intercepted.
+  // We always push so popstate fires on Android back; the handler decides
+  // whether to block (mid-experiment) or honour (let user exit naturally).
+  try {
+    history.pushState({ route: name, routeArgs: args, pgg: true }, '', '');
+  } catch (e) {}
   render();
 }
 
@@ -402,7 +423,10 @@ function computeRound(contribs) {
   for (let m = 1; m <= 4; m++) {
     const A = contribs[m];
     const B = TOKENS_PER_ROUND - A;
-    perMember[m] = { A, B, C, D, E, F: B + E };
+    // F is the participant's per-round profit. Per study design, F is rounded UP
+    // (ceiling) so that payment in ZAR is always a whole favourable token count.
+    const F = Math.ceil(B + E);
+    perMember[m] = { A, B, C, D, E, F };
   }
   return perMember;
 }
@@ -447,6 +471,7 @@ function render() {
     memberThisRound: renderMemberThisRound,
     callFinalTotal: renderCallFinalTotal,
     finalTotal: renderFinalTotal,
+    z5Recon: renderZ5Recon,
     exportData: renderExport
   };
   const fn = renderers[route] || renderHome;
@@ -473,6 +498,14 @@ function renderSetup(app) {
       <div class="field">
         <label>Village Number</label>
         <input id="f-vnum" type="number" inputmode="numeric" placeholder="">
+      </div>
+      <div class="field">
+        <label>Village Type</label>
+        <select id="f-vtype">
+          <option value="">— select —</option>
+          <option value="HOMELAND">HOMELAND</option>
+          <option value="NON_HOMELAND">NON_HOMELAND</option>
+        </select>
       </div>
       <div class="field">
         <label>Session PIN (4 digits — used throughout the whole experiment)</label>
@@ -515,14 +548,17 @@ function renderSetup(app) {
     const name = document.getElementById('f-name').value.trim();
     const vname = document.getElementById('f-vname').value.trim();
     const vnum = document.getElementById('f-vnum').value.trim();
+    const vtype = document.getElementById('f-vtype').value;
     const pin = document.getElementById('f-pin').value.trim();
     const date = document.getElementById('f-date').value;
     if (!name || !vname || !vnum) { showToast('Please fill in all fields'); return; }
+    if (!vtype) { showToast('Please select Village Type'); return; }
     if (!/^\d{4}$/.test(pin)) { showToast('PIN must be 4 digits'); return; }
     STATE.setup = {
       facilitatorName: name,
       villageName: vname,
       villageNumber: vnum,
+      villageType: vtype,
       date: date,
       colour: selected,
       pin: pin
@@ -536,6 +572,13 @@ function renderSetup(app) {
    SCREEN: HOME (after setup — Facilitator-side top menu)
 ============================================================================= */
 function renderHome(app) {
+  const resuming = isMidExperiment();
+  const banner = resuming
+    ? `<div style="text-align:center; background:rgba(255,255,255,0.22); padding:12px; border-radius:12px; margin:8px 0; font-weight:600;">
+         ⚠ Experiment in progress<br>
+         <span style="font-weight:400; font-size:14px;">${sessionRoundLabel()}</span>
+       </div>`
+    : '';
   app.innerHTML = `
     <div class="header"><span class="title">🏠 Home</span></div>
     <div class="content">
@@ -543,9 +586,11 @@ function renderHome(app) {
         Village ${escapeHtml(String(STATE.setup.villageNumber).padStart(2,'0'))} · ${escapeHtml(STATE.setup.colour)} Group<br>
         Facilitator: ${escapeHtml(STATE.setup.facilitatorName)}
       </div>
+      ${banner}
       <hr class="divider">
-      <button class="btn" id="btn-this">Start Experiment</button>
+      <button class="btn primary" id="btn-this">${resuming ? 'Resume Experiment' : 'Start Experiment'}</button>
       <button class="btn" id="btn-hist">History Record</button>
+      <button class="btn" id="btn-z5">📋 Z5 Reconciliation</button>
       <button class="btn" id="btn-exp">Export to CSV</button>
       <div class="spacer"></div>
       <button class="btn outline" id="btn-reset">⚠ Reset All Data</button>
@@ -553,6 +598,7 @@ function renderHome(app) {
   `;
   document.getElementById('btn-this').onclick = () => go('thisRound');
   document.getElementById('btn-hist').onclick = () => go('history');
+  document.getElementById('btn-z5').onclick = () => go('z5Recon');
   document.getElementById('btn-exp').onclick = () => go('exportData');
   document.getElementById('btn-reset').onclick = () => {
     if (confirm('Reset all data? This cannot be undone.')) {
@@ -686,15 +732,23 @@ function renderHistoryTable(app) {
    SCREEN: THIS ROUND — entry warning then block menu
 ============================================================================= */
 function renderThisRoundMenu(app) {
+  const resuming = isMidExperiment();
   app.innerHTML = `
     <div class="header">
       <button class="home-btn" id="back">🏠</button>
-      <span class="title">Start Experiment</span>
+      <span class="title">${resuming ? 'Resume Experiment' : 'Start Experiment'}</span>
     </div>
     <div class="content center">
-      <p class="big-msg">Once you press Start, you cannot return to Home until all 40 rounds are complete.</p>
-      <p class="muted">Order is locked: Session 1 Rounds 1–20, then Session 2 Rounds 1–20.</p>
-      <button class="btn primary" id="start">Start</button>
+      ${resuming ? `
+        <p class="big-msg" style="color:#fff; background:rgba(255,255,255,0.2); padding:14px; border-radius:12px;">
+          Experiment in progress: ${sessionRoundLabel()}<br>
+          Press Resume to continue exactly where you left off — nothing already collected will be lost.
+        </p>
+      ` : `
+        <p class="big-msg">Once you press Start, you cannot return to Home until all 40 rounds are complete.</p>
+        <p class="muted">Order is locked: Session 1 Rounds 1–20, then Session 2 Rounds 1–20.</p>
+      `}
+      <button class="btn primary" id="start">${resuming ? 'Resume' : 'Start'}</button>
       <div class="btn-row" style="margin-top:8px;">
         <button class="btn outline" id="back2">← Back</button>
         <button class="btn outline" id="home2">🏠 Home</button>
@@ -705,16 +759,72 @@ function renderThisRoundMenu(app) {
   document.getElementById('back2').onclick = () => go('home');
   document.getElementById('home2').onclick = () => go('home');
   document.getElementById('start').onclick = () => {
-    // Find next round in the locked order (Session 1 R1..20, Session 2 R1..20)
+    // advanceToNextRound now correctly resumes if mid-experiment
     advanceToNextRound();
   };
 }
 
 /* ---------- Locked auto-flow advance ----------
-   Order: S1-R1..R10 (block A), S1-R11..R20 (block B), S2-R1..R10 (A), S2-R11..R20 (B).
-   Finds the first round not yet completed for member 1 and routes to callMember 1.
-   If all 40 rounds are done, routes home. */
+   This is THE state machine for the experiment. Called every time we don't
+   know what to render next (Start button, Continue after final total, page
+   reload). It examines current STATE and routes to the correct screen so that
+   NOTHING already collected is ever wiped.
+
+   Decision order:
+   1) If contribution phase and any pending contribution exists -> RESUME contributions
+      at the first member whose pending value is still null. If all 4 already
+      filled, jump straight to groupTotal (results phase entry).
+   2) If results phase (contributions saved to history this round) AND not all
+      4 members have viewed their results -> RESUME results at next unviewed
+      member.
+   3) If results phase AND all 4 have viewed AND finalTotal not yet shown ->
+      go to the PIN gate for finalTotal.
+   4) Otherwise -> advance to the next round in the locked order (S1 R1..20,
+      S2 R1..20), reset per-round flags, and start at callMember 1.
+   5) If all 40 rounds done -> home.
+*/
 function advanceToNextRound() {
+  // --- Case 1: contribution phase in progress, resume where we left off ---
+  if (STATE.currentSession != null && STATE.currentSection === 0) {
+    const pc = STATE.pendingContributions;
+    const anyFilled = [1,2,3,4].some(m => pc[m] != null);
+    if (anyFilled) {
+      // Find first member who hasn't filled
+      const nextM = [1,2,3,4].find(m => pc[m] == null);
+      if (nextM != null) {
+        // Resume at that member's callMember
+        go('callMember', { memberNo: nextM });
+        return;
+      }
+      // All 4 filled but we got here -> show groupTotal
+      const C = pc[1] + pc[2] + pc[3] + pc[4];
+      go('groupTotal', { C });
+      return;
+    }
+  }
+
+  // --- Case 2 & 3: results phase, find next unviewed member or finalTotal ---
+  if (STATE.currentSession != null && STATE.currentSection === 1) {
+    const r = STATE.currentRound;
+    const allRoundRecorded = [1,2,3,4].every(m =>
+      STATE.history[m].some(x =>
+        x.session === STATE.currentSession && x.block === STATE.currentBlock && x.round === r));
+    if (allRoundRecorded) {
+      const nextUnviewed = [1,2,3,4].find(m => !STATE.viewedResults[m]);
+      if (nextUnviewed != null) {
+        go('callMemberResults', { memberNo: nextUnviewed });
+        return;
+      }
+      // All 4 have viewed -> show finalTotal (gated by PIN)
+      if (!STATE.finalTotalShown) {
+        go('callFinalTotal');
+        return;
+      }
+      // Otherwise fall through to next round
+    }
+  }
+
+  // --- Case 4 & 5: start a fresh round (or go home if all 40 done) ---
   const order = [
     { s: 1, b: 'A' }, { s: 1, b: 'B' },
     { s: 2, b: 'A' }, { s: 2, b: 'B' }
@@ -729,6 +839,11 @@ function advanceToNextRound() {
       STATE.currentRound = next;
       STATE.currentSection = 0;
       STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
+      STATE.pendingStartTimes = {1:null, 2:null, 3:null, 4:null};
+      STATE.pendingTimestamps = {1:null, 2:null, 3:null, 4:null};
+      STATE.pendingDecisionSeconds = {1:null, 2:null, 3:null, 4:null};
+      STATE.viewedResults = {1:false, 2:false, 3:false, 4:false};
+      STATE.finalTotalShown = false;
       saveState();
       go('callMember', { memberNo: 1 });
       return;
@@ -737,8 +852,36 @@ function advanceToNextRound() {
   // All 40 rounds complete
   STATE.currentSection = 0;
   STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
+  STATE.pendingStartTimes = {1:null, 2:null, 3:null, 4:null};
+  STATE.pendingTimestamps = {1:null, 2:null, 3:null, 4:null};
+  STATE.pendingDecisionSeconds = {1:null, 2:null, 3:null, 4:null};
+  STATE.viewedResults = {1:false, 2:false, 3:false, 4:false};
+  STATE.finalTotalShown = false;
   saveState();
   go('home');
+}
+
+/* Returns true if we are mid-experiment (some round started but not all 40 done).
+   Used by the Start/Resume screen and the popstate hook. */
+function isMidExperiment() {
+  if (!STATE.setup) return false;
+  if (STATE.currentSession == null) return false;
+  // Contribution phase with any pending value -> in progress
+  if (STATE.currentSection === 0 &&
+      [1,2,3,4].some(m => STATE.pendingContributions[m] != null)) return true;
+  // Results phase: round recorded but not yet finished (some member unviewed OR final total not shown)
+  if (STATE.currentSection === 1) {
+    const r = STATE.currentRound;
+    const allRoundRecorded = [1,2,3,4].every(m =>
+      STATE.history[m].some(x =>
+        x.session === STATE.currentSession && x.block === STATE.currentBlock && x.round === r));
+    if (allRoundRecorded) {
+      const someUnviewed = [1,2,3,4].some(m => !STATE.viewedResults[m]);
+      if (someUnviewed) return true;
+      if (!STATE.finalTotalShown) return true;
+    }
+  }
+  return false;
 }
 
 /* =============================================================================
@@ -907,6 +1050,13 @@ function renderMemberHistoryTable(m, session, block, fromResults) {
 ============================================================================= */
 function renderMemberContribute(app) {
   const m = routeArgs.memberNo;
+  // Record start time the first time this member sees the contribute screen
+  // (don't overwrite on subsequent visits, e.g. coming back from Confirm via "Back",
+  // because the decision time should reflect total deliberation from first view to confirm).
+  if (STATE.pendingStartTimes[m] == null) {
+    STATE.pendingStartTimes[m] = Date.now();
+    saveState();
+  }
   let chosen = STATE.pendingContributions[m] != null ? STATE.pendingContributions[m] : null;
   app.innerHTML = `
     <div class="header"><span class="title">👤 ${escapeHtml(memberLabel(m))} · ${sessionRoundLabel()}</span></div>
@@ -967,7 +1117,18 @@ function renderMemberConfirm(app) {
     </div>
   `;
   document.getElementById('back').onclick = () => go('memberContribute', { memberNo: m });
-  document.getElementById('confirm').onclick = () => go('memberThanks', { memberNo: m });
+  document.getElementById('confirm').onclick = () => {
+    // Lock in timestamp & decision-seconds at the moment of Confirm.
+    // start time was recorded the first time this member opened the contribute screen.
+    const now = Date.now();
+    STATE.pendingTimestamps[m] = new Date(now).toISOString();
+    const startMs = STATE.pendingStartTimes[m];
+    if (startMs != null) {
+      STATE.pendingDecisionSeconds[m] = Math.max(0, (now - startMs) / 1000);
+    }
+    saveState();
+    go('memberThanks', { memberNo: m });
+  };
 }
 
 /* SCREEN: THANKS — for the participant */
@@ -1026,7 +1187,9 @@ function renderGroupTotal(app) {
         session: STATE.currentSession,
         block: STATE.currentBlock,
         round: STATE.currentRound,
-        ...per[m]
+        ...per[m],
+        contribution_timestamp: STATE.pendingTimestamps[m],
+        decision_seconds: STATE.pendingDecisionSeconds[m]
       };
       // replace if same session/block/round already exists
       STATE.history[m] = STATE.history[m].filter(r =>
@@ -1034,7 +1197,7 @@ function renderGroupTotal(app) {
       STATE.history[m].push(rec);
       // running totals
       STATE.lastTotals[m].tokens += rec.F;
-      STATE.lastTotals[m].zar = Math.round((STATE.lastTotals[m].tokens / TOKENS_PER_ZAR) * 100) / 100;
+      STATE.lastTotals[m].zar = Math.ceil(STATE.lastTotals[m].tokens / TOKENS_PER_ZAR);
     }
     STATE.currentSection = 1; // now move into results phase
     saveState();
@@ -1126,6 +1289,9 @@ function renderMemberThisRound(app) {
   `;
   document.getElementById('back').onclick = () => go('memberHomeResults', { memberNo: m });
   document.getElementById('ok').onclick = () => {
+    // Mark this member as having seen their result THIS ROUND (so we don't ask twice)
+    STATE.viewedResults[m] = true;
+    saveState();
     if (m < 4) {
       go('callMemberResults', { memberNo: m + 1 });
     } else {
@@ -1175,13 +1341,83 @@ function renderFinalTotal(app) {
     </div>
   `;
   document.getElementById('next').onclick = () => {
+    // Mark final total as shown for this round (so a reload at this point doesn't loop)
+    STATE.finalTotalShown = true;
     // clear in-progress state for the round just finished
     STATE.currentSection = 0;
     STATE.pendingContributions = {1:null, 2:null, 3:null, 4:null};
+    STATE.pendingStartTimes = {1:null, 2:null, 3:null, 4:null};
+    STATE.pendingTimestamps = {1:null, 2:null, 3:null, 4:null};
+    STATE.pendingDecisionSeconds = {1:null, 2:null, 3:null, 4:null};
     saveState();
     // Auto-advance to the next round in the locked order, or home if all 40 done
     advanceToNextRound();
   };
+}
+
+/* =============================================================================
+   SCREEN: Z5 RECONCILIATION — facilitator-only payment summary per member
+============================================================================= */
+function renderZ5Recon(app) {
+  // Determine which member is selected (default 1, override via routeArgs.memberNo)
+  const m = routeArgs.memberNo || 1;
+  // Sum all F across all rounds in history for this member
+  const rounds = STATE.history[m] || [];
+  const totalF = rounds.reduce((acc, r) => acc + (r.F || 0), 0);
+  // ZAR conversion uses ceiling (rounding policy: in participant's favour)
+  const zarFromF = Math.ceil(totalF / TOKENS_PER_ZAR);
+  const grand = zarFromF + SHOW_UP_FEE_ZAR;
+  const completedCount = rounds.length;
+
+  // Per-member selector chips
+  let chips = '';
+  for (let mm = 1; mm <= 4; mm++) {
+    chips += `<button class="btn ${mm === m ? 'primary' : 'outline'}" style="flex:1; padding:12px;" data-m="${mm}">${mm}</button>`;
+  }
+
+  app.innerHTML = `
+    <div class="header">
+      <button class="home-btn" id="back">🏠</button>
+      <span class="title">Z5 — Payment Reconciliation</span>
+    </div>
+    <div class="content">
+      <p style="text-align:center; opacity:0.9;">Select member:</p>
+      <div style="display:flex; gap:8px; margin:8px 0 16px;">${chips}</div>
+
+      <div class="result-card">
+        <h2 style="text-align:center; font-size:18px;">${escapeHtml(memberLabel(m))}</h2>
+        <div style="text-align:center; opacity:0.8; font-size:14px; margin-bottom:8px;">
+          Rounds completed: ${completedCount} / 40
+        </div>
+
+        <div class="result-row">
+          <div class="label">Sum of F across all rounds</div>
+          <div class="value">${totalF} tokens</div>
+        </div>
+        <div class="result-row">
+          <div class="label">Tokens → ZAR (÷${TOKENS_PER_ZAR}, ceiling)</div>
+          <div class="value">${totalF} ÷ ${TOKENS_PER_ZAR} = R ${zarFromF}</div>
+        </div>
+        <div class="result-row">
+          <div class="label">+ Show-up fee</div>
+          <div class="value">R ${SHOW_UP_FEE_ZAR}</div>
+        </div>
+        <hr class="divider">
+        <div class="result-row" style="background:rgba(255,255,255,0.35);">
+          <div class="label" style="font-weight:600;">Grand total to pay</div>
+          <div class="value" style="font-size:32px;">R ${grand}</div>
+        </div>
+      </div>
+
+      <button class="btn outline" id="home2">🏠 Home</button>
+    </div>
+  `;
+  document.getElementById('back').onclick = () => go('home');
+  document.getElementById('home2').onclick = () => go('home');
+  // Wire up the member selector chips
+  app.querySelectorAll('[data-m]').forEach(el => {
+    el.onclick = () => go('z5Recon', { memberNo: Number(el.dataset.m) });
+  });
 }
 
 /* =============================================================================
@@ -1226,22 +1462,90 @@ function renderExport(app) {
 function buildCSV() {
   const s = STATE.setup;
   const header = [
-    'village_number','village_name','group_colour','date','facilitator',
-    'participant_id','session','block','round',
-    'A_contribution','B_private_kept','C_group_total','D_C_times_mult','E_share','F_profit'
+    // village/treatment identifiers
+    'village_number','village_name','village_type',
+    'group_colour','date','facilitator_name',
+    // participant identifiers
+    'participant_id','member_no',
+    // experimental structure
+    'session','block','round',
+    // treatment dummies
+    'treatment_chief','treatment_comm',
+    // A-F computed columns
+    'A_contribution','B_private_kept','C_group_total',
+    'D_C_times_mult','E_share','F_profit',
+    // timing
+    'contribution_timestamp','decision_seconds',
+    // lag variables (prior round, same group)
+    'prev_round_C','prev_round_my_F',
+    // per-round group-level descriptive stats
+    'sd_contribution','min_contribution','max_contribution',
+    'free_rider_count','full_contrib_count'
   ];
   let out = header.join(',') + '\n';
+
+  // We need group-wide stats for each (session, block, round). Pre-compute
+  // a lookup keyed by "S_B_R" -> { contribs:[A1,A2,A3,A4], sd, min, max, fr, fc, C }
+  const groupStats = {};
+  // Build "round keys" from member 1's history (any member would do; they all agree)
+  const keys = new Set();
+  for (let mm = 1; mm <= 4; mm++) {
+    STATE.history[mm].forEach(r => keys.add(`${r.session}|${r.block}|${r.round}`));
+  }
+  keys.forEach(key => {
+    const [sess, blk, rnd] = key.split('|');
+    const arr = [];
+    for (let mm = 1; mm <= 4; mm++) {
+      const rec = STATE.history[mm].find(x =>
+        String(x.session) === sess && x.block === blk && String(x.round) === rnd);
+      if (rec) arr.push(rec.A);
+    }
+    if (arr.length === 0) return;
+    const mean = arr.reduce((a,b)=>a+b,0) / arr.length;
+    const variance = arr.reduce((acc,v) => acc + (v - mean)**2, 0) / arr.length;
+    const sd = Math.sqrt(variance);
+    groupStats[key] = {
+      sd: Math.round(sd * 1000) / 1000,
+      min: Math.min(...arr),
+      max: Math.max(...arr),
+      free: arr.filter(v => v === 0).length,
+      full: arr.filter(v => v === TOKENS_PER_ROUND).length
+    };
+  });
+
+  // Treatment dummy: block 'A' = no comm = 0, block 'B' = with comm = 1
+  const blockToCommDummy = b => (b === 'B' ? 1 : 0);
+  // Treatment dummy: session 1 = no chief = 0, session 2 = with chief = 1
+  const sessionToChiefDummy = sess => (Number(sess) === 2 ? 1 : 0);
+  // CSV-safe cell: replace commas/newlines, also handle null/undefined
+  const cell = v => v == null ? '' : String(v).replace(/[",\n]/g,' ');
+
   for (let m = 1; m <= 4; m++) {
     const rows = STATE.history[m].slice().sort((a,b)=>{
       if (a.session !== b.session) return a.session - b.session;
       return a.round - b.round;
     });
-    rows.forEach(r => {
-      out += [
-        s.villageNumber, s.villageName, s.colour, s.date, s.facilitatorName,
-        memberLabel(m), r.session, r.block, r.round,
-        r.A, r.B, r.C, r.D, r.E, r.F
-      ].map(x => String(x).replace(/[",\n]/g,' ')).join(',') + '\n';
+    // Build map for prev-round lookups by ordinal position within this member's
+    // chronological play. The "previous round" is the round immediately before
+    // it in the locked sequence: S1R1 -> S1R2 -> ... -> S1R20 -> S2R1 -> ...
+    rows.forEach((r, idx) => {
+      const prev = idx > 0 ? rows[idx - 1] : null;
+      const key = `${r.session}|${r.block}|${r.round}`;
+      const gs = groupStats[key] || {};
+      const rowOut = [
+        s.villageNumber, s.villageName, s.villageType || '',
+        s.colour, s.date, s.facilitatorName,
+        memberLabel(m), m,
+        r.session, blockToCommDummy(r.block), r.round,
+        sessionToChiefDummy(r.session), blockToCommDummy(r.block),
+        r.A, r.B, r.C,
+        r.D, r.E, r.F,
+        r.contribution_timestamp || '', r.decision_seconds != null ? Math.round(r.decision_seconds * 1000) / 1000 : '',
+        prev ? prev.C : '', prev ? prev.F : '',
+        gs.sd != null ? gs.sd : '', gs.min != null ? gs.min : '', gs.max != null ? gs.max : '',
+        gs.free != null ? gs.free : '', gs.full != null ? gs.full : ''
+      ].map(cell).join(',');
+      out += rowOut + '\n';
     });
   }
   return out;
@@ -1251,6 +1555,8 @@ function buildCSV() {
    STARTUP
 ============================================================================= */
 window.addEventListener('load', () => {
+  // Seed an initial history entry so popstate can fire
+  try { history.replaceState({ route, routeArgs, pgg: true }, '', ''); } catch (e) {}
   render();
   // Register service worker for offline use
   if ('serviceWorker' in navigator) {
@@ -1258,9 +1564,23 @@ window.addEventListener('load', () => {
   }
 });
 
-// prevent accidental swipe-back navigation
+/* Block hardware/browser back button during the experiment.
+   When the user presses back, popstate fires; if we're mid-experiment we
+   re-push a state to keep them on the current screen (effectively a no-op).
+   Outside the experiment (Setup, Home, History viewing, Export) we let the
+   default behaviour happen — there is no in-app navigation to undo there. */
+window.addEventListener('popstate', (e) => {
+  if (isMidExperiment()) {
+    // Re-push so the back stack remains; do not advance state.
+    try { history.pushState({ route, routeArgs, pgg: true }, '', ''); } catch (err) {}
+    // Optionally show a quick toast to make this visible to the facilitator
+    showToast('Back is disabled during the experiment. Continue from the current screen.');
+  }
+});
+
+// Belt and braces: also block accidental swipe-back / refresh / close.
 window.addEventListener('beforeunload', (e) => {
-  if (STATE.currentSection === 0 && Object.values(STATE.pendingContributions).some(v=>v!=null)) {
+  if (isMidExperiment()) {
     e.preventDefault();
     e.returnValue = '';
   }
