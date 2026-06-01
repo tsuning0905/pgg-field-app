@@ -298,7 +298,13 @@ const GROUP_COLOURS = {
   Orange: { base: '#E08A3D', shades: ['#E08A3D', '#C97328', '#EB9F55', '#B5611E'] },
   Purple: { base: '#8A5DB8', shades: ['#8A5DB8', '#74489E', '#A075CE', '#5E3984'] }
 };
-const COLOUR_KEYS = ['Red','Yellow','Blue','Green','Orange','Purple'];
+// Order matters: this is also the colour code mapping
+// Red=01, Orange=02, Yellow=03, Green=04, Blue=05, Purple=06
+const COLOUR_KEYS = ['Red','Orange','Yellow','Green','Blue','Purple'];
+const COLOUR_CODES = {
+  Red: '01', Orange: '02', Yellow: '03',
+  Green: '04', Blue: '05', Purple: '06'
+};
 
 const MPCR_NUM = 2;        // total contributions are multiplied by 2 then split by 4 -> MPCR 0.5
 const TOKENS_PER_ROUND = 10;
@@ -319,6 +325,8 @@ function loadState() {
       if (!parsed.pendingStartTimes) parsed.pendingStartTimes = {1:null, 2:null, 3:null, 4:null};
       if (!parsed.pendingTimestamps) parsed.pendingTimestamps = {1:null, 2:null, 3:null, 4:null};
       if (!parsed.pendingDecisionSeconds) parsed.pendingDecisionSeconds = {1:null, 2:null, 3:null, 4:null};
+      // Legacy setups (before Run was added) default to run=1
+      if (parsed.setup && parsed.setup.run == null) parsed.setup.run = 1;
       return parsed;
     }
   } catch (e) {}
@@ -387,11 +395,24 @@ function setBg(colour) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+/* UI label: just colour_code + member (e.g. "05_02" for Blue group, member 2).
+   Shown in headers and other on-screen places; intentionally hides village number
+   because all 4 facilitators in one village run different group colours, so the
+   colour-code is what disambiguates participants on the day. */
 function memberLabel(memberNo) {
-  // e.g. "01_Red_01"
-  const vn = String(STATE.setup.villageNumber).padStart(2,'0');
-  const mn = String(memberNo).padStart(2,'0');
-  return `${vn}_${STATE.setup.colour}_${mn}`;
+  const cc = COLOUR_CODES[STATE.setup.colour] || '00';
+  const mn = String(memberNo).padStart(2, '0');
+  return `${cc}_${mn}`;
+}
+/* CSV participant_id: village_number + run + colour_code + member
+   (e.g. "01_01_05_02" for village 01, run 1, Blue group, member 2).
+   The `run` segment distinguishes a second experiment at the same village. */
+function memberLabelCSV(memberNo) {
+  const vn = String(STATE.setup.villageNumber).padStart(2, '0');
+  const run = String(STATE.setup.run || 1).padStart(2, '0');
+  const cc = COLOUR_CODES[STATE.setup.colour] || '00';
+  const mn = String(memberNo).padStart(2, '0');
+  return `${vn}_${run}_${cc}_${mn}`;
 }
 function roundsForBlock(block) {
   return block === 'A' ? [1,2,3,4,5,6,7,8,9,10] : [11,12,13,14,15,16,17,18,19,20];
@@ -500,6 +521,11 @@ function renderSetup(app) {
         <input id="f-vnum" type="number" inputmode="numeric" placeholder="">
       </div>
       <div class="field">
+        <label>Run</label>
+        <input id="f-run" type="number" inputmode="numeric" min="1" value="1">
+        <div style="font-size:13px; opacity:0.75; margin-top:4px;">Enter 2 if this is the second experiment in the same village.</div>
+      </div>
+      <div class="field">
         <label>Village Type</label>
         <select id="f-vtype">
           <option value="">— select —</option>
@@ -548,16 +574,20 @@ function renderSetup(app) {
     const name = document.getElementById('f-name').value.trim();
     const vname = document.getElementById('f-vname').value.trim();
     const vnum = document.getElementById('f-vnum').value.trim();
+    const runStr = document.getElementById('f-run').value.trim();
     const vtype = document.getElementById('f-vtype').value;
     const pin = document.getElementById('f-pin').value.trim();
     const date = document.getElementById('f-date').value;
     if (!name || !vname || !vnum) { showToast('Please fill in all fields'); return; }
+    const runNum = parseInt(runStr, 10);
+    if (!Number.isInteger(runNum) || runNum < 1) { showToast('Run must be a positive integer (default 1)'); return; }
     if (!vtype) { showToast('Please select Village Type'); return; }
     if (!/^\d{4}$/.test(pin)) { showToast('PIN must be 4 digits'); return; }
     STATE.setup = {
       facilitatorName: name,
       villageName: vname,
       villageNumber: vnum,
+      run: runNum,
       villageType: vtype,
       date: date,
       colour: selected,
@@ -583,7 +613,7 @@ function renderHome(app) {
     <div class="header"><span class="title">🏠 Home</span></div>
     <div class="content">
       <div style="text-align:center; opacity:0.85; margin-bottom:8px;">
-        Village ${escapeHtml(String(STATE.setup.villageNumber).padStart(2,'0'))} · ${escapeHtml(STATE.setup.colour)} Group<br>
+        Village ${escapeHtml(String(STATE.setup.villageNumber).padStart(2,'0'))} · Run ${escapeHtml(String(STATE.setup.run || 1))} · ${escapeHtml(STATE.setup.colour)} Group<br>
         Facilitator: ${escapeHtml(STATE.setup.facilitatorName)}
       </div>
       ${banner}
@@ -1444,7 +1474,7 @@ function renderExport(app) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const fn = `PGG_${STATE.setup.villageNumber}_${STATE.setup.colour}_${STATE.setup.date}.csv`;
+    const fn = `PGG_v${STATE.setup.villageNumber}_run${STATE.setup.run || 1}_${STATE.setup.colour}_${STATE.setup.date}.csv`;
     a.download = fn;
     document.body.appendChild(a);
     a.click();
@@ -1463,7 +1493,7 @@ function buildCSV() {
   const s = STATE.setup;
   const header = [
     // village/treatment identifiers
-    'village_number','village_name','village_type',
+    'village_number','run','village_name','village_type',
     'group_colour','date','facilitator_name',
     // participant identifiers
     'participant_id','member_no',
@@ -1533,9 +1563,9 @@ function buildCSV() {
       const key = `${r.session}|${r.block}|${r.round}`;
       const gs = groupStats[key] || {};
       const rowOut = [
-        s.villageNumber, s.villageName, s.villageType || '',
+        s.villageNumber, (s.run || 1), s.villageName, s.villageType || '',
         s.colour, s.date, s.facilitatorName,
-        memberLabel(m), m,
+        memberLabelCSV(m), m,
         r.session, blockToCommDummy(r.block), r.round,
         sessionToChiefDummy(r.session), blockToCommDummy(r.block),
         r.A, r.B, r.C,
